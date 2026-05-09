@@ -84,6 +84,10 @@ def predict(model, bag_features, device='cpu'):
         # Average of bag-level and max-instance streams (both sigmoid-activated)
         score = 0.5 * torch.sigmoid(bag_prediction) + 0.5 * torch.sigmoid(max_prediction.view(1, -1))
 
+        print("bag prediction", bag_prediction)
+        print("max prediction", max_prediction)
+        print("score", score)
+
         # Normalize to a proper probability distribution (sums to 1)
         probs = torch.softmax(score, dim=1).squeeze().cpu().numpy()
         pred = int(np.argmax(probs))
