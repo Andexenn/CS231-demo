@@ -316,29 +316,37 @@ def process_wsi(wsi_files):
 # ---------------------------------------------------------------------------
 # Gradio UI
 # ---------------------------------------------------------------------------
-with gr.Blocks(title="WSI Classifier") as demo:
-    gr.Markdown("# WSI Feature Extraction and Classification Demo")
+# Using light theme as requested
+with gr.Blocks(title="NSCLC WSI Classifier", theme=gr.themes.Default()) as demo:
+    with gr.Row():
+        with gr.Column(scale=8):
+            gr.Markdown("# Demo: Multiple Instance Learning for NSCLC Classification")
+            gr.Markdown("### Course: CS231 | Major: Software Engineering")
+        with gr.Column(scale=2):
+            # Optional: Add a small placeholder or logo if needed, otherwise just spacing
+            pass
+
     gr.Markdown(
-        "Upload one or more Whole Slide Images (`.svs`) below. "
-        "The system will automatically:\n"
-        "1. Identify tissue patches using **PrePATH** (segmentation + patching + stitching).\n"
-        "2. Extract visual features using a pre-trained **ResNet50**.\n"
-        "3. Run features through **ABMIL**, **CEMIL**, and **DSMIL** models.\n"
-        "4. Display predictions (**LUAD** or **LUSC**) for every uploaded slide."
+        "This application demonstrates the end-to-end processing and classification of "
+        "Non-Small Cell Lung Cancer (NSCLC) Whole Slide Images. Supported types: **LUAD** and **LUSC**.\n\n"
+        "**Pipeline Workflow:**\n"
+        "1. **PrePATH:** Tissue segmentation, patching (256px), and stitching.\n"
+        "2. **ResNet50:** Visual feature extraction from each tissue patch.\n"
+        "3. **MIL Models:** Inference using **ABMIL**, **CEMIL**, and **DSMIL** architectures."
     )
 
     with gr.Row():
         wsi_input = gr.File(
-            label="Upload .svs WSI(s) — multiple files supported",
+            label="Upload .svs WSI(s) — Multiple files supported",
             file_types=[".svs"],
             file_count="multiple",
         )
 
-    run_btn = gr.Button("Extract Features & Predict", variant="primary")
+    run_btn = gr.Button("🚀 Extract Features & Predict", variant="primary")
 
     results_table = gr.Dataframe(
         headers=["Slide", "ABMIL", "CEMIL", "DSMIL"],
-        label="Prediction Results",
+        label="Diagnostic Predictions (LUAD vs LUSC)",
         wrap=True,
         interactive=False,
     )
@@ -350,4 +358,5 @@ with gr.Blocks(title="WSI Classifier") as demo:
     )
 
 if __name__ == "__main__":
+    # Launch on all interfaces for remote access
     demo.launch(server_name="0.0.0.0", server_port=7890)
