@@ -47,8 +47,9 @@ def load_models(instructor_ckpt, learner_ckpt, device='cpu', input_size=1024, hi
 def predict(instructor, learner, bag_features, k_ratio=0.6, device='cpu'):
     """
     bag_features: Tensor of shape (num_patches, input_size)
-    Returns: prediction (int), probabilities, top indices selected, instructor attention, learner attention
+    Returns: prediction (int), label (str), probabilities, top indices selected, instructor attention, learner attention
     """
+    class_map = {0: "LUAD", 1: "LUSC"}
     bag_features = bag_features.squeeze(0).to(device)
     with torch.no_grad():
         # Get attention from instructor
@@ -61,6 +62,6 @@ def predict(instructor, learner, bag_features, k_ratio=0.6, device='cpu'):
         # Learner predicts using the top-k patches
         logits, A_L, _ = learner(top_bag)
         probs = torch.softmax(logits, dim=1)
-        pred = torch.argmax(probs, dim=1)
+        pred = torch.argmax(probs, dim=1).item()
         
-    return pred.item(), probs.squeeze().cpu().numpy(), top_indices.cpu().numpy(), A_I.squeeze().cpu().numpy(), A_L.squeeze().cpu().numpy()
+    return pred, class_map[pred], probs.squeeze().cpu().numpy(), top_indices.cpu().numpy(), A_I.squeeze().cpu().numpy(), A_L.squeeze().cpu().numpy()

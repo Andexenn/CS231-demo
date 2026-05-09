@@ -48,11 +48,12 @@ def load_model(checkpoint_path, device='cpu', input_size=1024, hidden_size=512, 
 def predict(model, bag_features, device='cpu'):
     """
     bag_features: Tensor of shape (num_patches, input_size)
-    Returns: prediction (int), probabilities (numpy array), attention weights (numpy array)
+    Returns: prediction (int), label (str), probabilities (numpy array), attention weights (numpy array)
     """
+    class_map = {0: "LUAD", 1: "LUSC"}
     bag_features = bag_features.to(device)
     with torch.no_grad():
         logits, A, _ = model(bag_features)
         probs = torch.softmax(logits, dim=1)
-        pred = torch.argmax(probs, dim=1)
-    return pred.item(), probs.squeeze().cpu().numpy(), A.squeeze().cpu().numpy()
+        pred = torch.argmax(probs, dim=1).item()
+    return pred, class_map[pred], probs.squeeze().cpu().numpy(), A.squeeze().cpu().numpy()

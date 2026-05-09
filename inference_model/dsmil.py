@@ -69,16 +69,23 @@ def load_model(checkpoint_path, device='cpu', in_feats=1024, reduced_feats=512, 
 def predict(model, bag_features, device='cpu'):
     """
     bag_features: Tensor of shape (num_patches, in_feats)
-    Returns: prediction (int), probabilities, attention weights
+    Returns: prediction (int), label (str), probabilities, attention weights
+
+    Note: DSMIL scores each class via sigmoid independently (dual-stream: bag-level
+    + max-instance), so the raw scores do NOT sum to 1. We apply softmax at the end
+    to normalize them into a proper probability distribution comparable to ABMIL/CEMIL.
     """
+    class_map = {0: "LUAD", 1: "LUSC"}
     bag_features = bag_features.squeeze(0).to(device)
     with torch.no_grad():
         ins_scores, bag_prediction, A, B = model(bag_features)
         max_prediction, _ = torch.max(ins_scores, 0)
-        
-        # Final prediction is average of both streams (max-pooling & attention)
+
+        # Average of bag-level and max-instance streams (both sigmoid-activated)
         score = 0.5 * torch.sigmoid(bag_prediction) + 0.5 * torch.sigmoid(max_prediction.view(1, -1))
-        probs = score.squeeze().cpu().numpy()
-        pred = np.argmax(probs)
-        
-    return int(pred), probs, A.squeeze().cpu().numpy()
+
+        # Normalize to a proper probability distribution (sums to 1)
+        probs = torch.softmax(score, dim=1).squeeze().cpu().numpy()
+        pred = int(np.argmax(probs))
+
+    return pred, class_map[pred], probs, A.squeeze().cpu().numpy()
