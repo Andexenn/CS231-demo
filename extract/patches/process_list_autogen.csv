@@ -1,2 +1,2 @@
 slide_id,process,status,seg_level,sthresh,mthresh,close,use_otsu,keep_ids,exclude_ids,a_t,a_h,max_n_holes,vis_level,line_thickness,use_padding,contour_fn
-/mmlab_students/storageStudents/nguyenvd/UIT2024_medicare/ExtractFeature/CS231-demo/wsi_proc_c04_yiqz/wsi/TCGA-44-7662-01Z-00-DX1.2f0b6cea-795a-40ad-93a9-319858e6fb3b.svs,0,already_exist,-1,8,7,4,True,none,none,16.0,4.0,8,-1,100,True,four_pt
+/tmp/wsi_proc_oxrz74u1/wsi/TCGA-05-4244-01Z-00-DX1.d4ff32cd-38cf-40ea-8213-45c2b100ac01.svs,0,tbp,-1,8,7,4,True,none,none,16.0,4.0,8,-1,100,True,four_pt

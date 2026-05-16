@@ -9,6 +9,7 @@ import sys
 import glob
 import pandas as pd
 import numpy as np
+import re
 from datetime import datetime
 
 # ---------------------------------------------------------------------------
@@ -29,8 +30,21 @@ PREPATH_PYTHON = "/home/nguyenvd_drone/anaconda3/envs/UIT2024_medicare_env/bin/p
 MANIFEST_PATH = os.path.join(BASE_DIR, "split_manifest.csv")
 
 # Regex to strip the luad__ / lusc__ prefix from manifest filenames
-import re
 _PREFIX_RE = re.compile(r'^(luad|lusc)__', re.IGNORECASE)
+
+def _strip_known_ext(name):
+    """
+    Strip only known WSI / feature-file extensions from a filename.
+    NEVER uses os.path.splitext blindly because TCGA slide IDs contain
+    dots followed by UUIDs (e.g. '.2f0b6cea-795a-40ad-93a9-319858e6fb3b')
+    which os.path.splitext would wrongly treat as an extension.
+    """
+    _KNOWN_EXTS = ('.svs', '.pt', '.ndpi', '.tiff', '.tif',
+                   '.scn', '.bif', '.mrxs', '.svslide', '.vms', '.vmu')
+    for ext in _KNOWN_EXTS:
+        if name.lower().endswith(ext):
+            return name[: -len(ext)]
+    return name
 
 def load_label_map(manifest_path):
     """
@@ -49,7 +63,7 @@ def load_label_map(manifest_path):
     df = pd.read_csv(manifest_path)
     for _, row in df.iterrows():
         # strip the .pt extension
-        stem = os.path.splitext(str(row["filename"]))[0]
+        stem = _strip_known_ext(str(row["filename"]))
         label = str(row["label"]).upper()  # 'LUAD' or 'LUSC'
         full_map[stem] = label
         # also index without the luad__/lusc__ prefix
@@ -60,40 +74,9 @@ def load_label_map(manifest_path):
 LABEL_MAP_FULL, LABEL_MAP_BARE = load_label_map(MANIFEST_PATH)
 print(f"Loaded label map: {len(LABEL_MAP_FULL)} entries (full), {len(LABEL_MAP_BARE)} entries (bare).")
 
-def _strip_known_ext(name):
-    """
-    Strip only known WSI / feature-file extensions from a filename.
-    NEVER uses os.path.splitext blindly because TCGA slide IDs contain
-    dots followed by UUIDs (e.g. '.2f0b6cea-795a-40ad-93a9-319858e6fb3b')
-    which os.path.splitext would wrongly treat as an extension.
-    """
-    _KNOWN_EXTS = ('.svs', '.pt', '.ndpi', '.tiff', '.tif',
-                   '.scn', '.bif', '.mrxs', '.svslide', '.vms', '.vmu')
-    for ext in _KNOWN_EXTS:
-        if name.lower().endswith(ext):
-            return name[: -len(ext)]
-    return name
-
-
 def get_ground_truth(slide_id):
     """
     Look up the ground-truth label for a slide_id.
-
-    The manifest stores filenames like:
-        luad__TCGA-44-7662-01Z-00-DX1.2f0b6cea-795a-40ad-93a9-319858e6fb3b.pt
-    The 'bare' key (in LABEL_MAP_BARE) is:
-        TCGA-44-7662-01Z-00-DX1.2f0b6cea-795a-40ad-93a9-319858e6fb3b
-
-    Input slide_id can be:
-      - Bare TCGA ID:                 TCGA-44-7662-01Z-00-DX1.2f0b6cea-...
-      - With prefix:                  luad__TCGA-44-7662-01Z-00-DX1.2f0b6cea-...
-      - With or without extension:    ...svs / ...pt / nothing
-
-    Strategy (all O(1) dict lookups):
-      1. Strip known file extension (.svs / .pt / etc.) if present
-      2. Try LABEL_MAP_FULL  (with prefix)
-      3. Strip luad__/lusc__ prefix, try LABEL_MAP_BARE
-      4. Case-insensitive fallback on LABEL_MAP_BARE
     """
     # Step 1: strip extension ONLY if it's a known file type
     slide_id = _strip_known_ext(slide_id)
@@ -183,13 +166,11 @@ def normalize_upload(wsi_files):
 def save_log(slide_id, model_name, log_data):
     """
     Save a JSON diagnostic log for a given slide and model.
-    Path: logs/<slide_id>/<model_name>.json
     """
     slide_log_dir = os.path.join(LOGS_DIR, slide_id)
     os.makedirs(slide_log_dir, exist_ok=True)
     log_path = os.path.join(slide_log_dir, f"{model_name}.json")
 
-    # Convert numpy arrays to lists for JSON serialization
     def to_serializable(obj):
         if isinstance(obj, np.ndarray):
             return obj.tolist()
@@ -219,11 +200,8 @@ def save_log(slide_id, model_name, log_data):
 def process_wsi(wsi_files, local_paths_text):
     """
     Process slides from either Gradio upload or local disk paths.
-    Returns a DataFrame with [Slide, Ground Truth, ABMIL, CEMIL, DSMIL].
     """
     empty_df = pd.DataFrame(columns=["Slide", "Ground Truth", "ABMIL", "CEMIL", "DSMIL"])
-
-    # --- Collect file paths from both sources ---
     file_paths = []
 
     # Source 1: Gradio upload
@@ -233,14 +211,25 @@ def process_wsi(wsi_files, local_paths_text):
     except ValueError as e:
         return pd.DataFrame({"Error": [str(e)]})
 
-    # Source 2: Local disk paths (one per line)
+    # Source 2: Local disk paths
     if local_paths_text and local_paths_text.strip():
         for line in local_paths_text.strip().splitlines():
             line = line.strip()
-            if line and os.path.exists(line):
+            if not line: continue
+            if os.path.exists(line):
                 file_paths.append(line)
-            elif line:
-                print(f"[WARN] Local path does not exist, skipping: {line}")
+            else:
+                potential_path = os.path.join(BASE_DIR, "images", line)
+                if os.path.exists(potential_path):
+                    file_paths.append(potential_path)
+                elif not line.lower().endswith(".svs"):
+                    potential_path_svs = potential_path + ".svs"
+                    if os.path.exists(potential_path_svs):
+                        file_paths.append(potential_path_svs)
+                    else:
+                        print(f"[WARN] Could not find file: {line}")
+                else:
+                    print(f"[WARN] Could not find file: {line}")
 
     if not file_paths:
         return empty_df
@@ -250,7 +239,10 @@ def process_wsi(wsi_files, local_paths_text):
     if not os.path.exists(prepath_dir):
         return pd.DataFrame({"Error": ["PrePATH directory not found."]})
 
-    temp_dir = tempfile.mkdtemp(prefix="wsi_proc_", dir=BASE_DIR)
+    # Use system /tmp instead of BASE_DIR (network mount) to ensure 
+    # OpenSlide/ASlide can read the file without "Unsupported" errors.
+    # Browser uploads work because they are stored in /tmp; we mimic that here.
+    temp_dir = tempfile.mkdtemp(prefix="wsi_proc_")
     wsi_dir  = os.path.join(temp_dir, "wsi")
     csv_dir  = os.path.join(temp_dir, "csv")
     feat_dir = os.path.join(temp_dir, "feats")
@@ -262,43 +254,61 @@ def process_wsi(wsi_files, local_paths_text):
     os.makedirs(patch_dir, exist_ok=True)
 
     slide_ids = []
-    for src_path in file_paths:
-        fname = os.path.basename(src_path)
-        if not fname.lower().endswith(".svs"):
-            fname = os.path.splitext(fname)[0] + ".svs"
-        dst_path = os.path.join(wsi_dir, fname)
-        # Use a symlink instead of copying — avoids double-copying huge WSI files
-        # through Gradio's temp directory which can corrupt or truncate the file.
-        src_abs = os.path.abspath(src_path)
-        if os.path.exists(dst_path) or os.path.islink(dst_path):
-            os.remove(dst_path)
-        os.symlink(src_abs, dst_path)
-        print(f"  Linked: {src_abs} -> {dst_path}")
-        slide_id = os.path.splitext(fname)[0]
+    id_to_temp_name = {}
+    
+    for i, src_path in enumerate(file_paths):
+        # 1. Original ID (preserves the long TCGA name)
+        fname_orig = os.path.basename(src_path)
+        if not fname_orig.lower().endswith(".svs"):
+            fname_orig = os.path.splitext(fname_orig)[0] + ".svs"
+            
+        slide_id = _strip_known_ext(fname_orig)
         slide_ids.append(slide_id)
+        
+        # 2. Use the ORIGINAL name in /tmp (Browser uploads do this, so it should work)
+        temp_name = fname_orig
+        id_to_temp_name[slide_id] = slide_id 
+        dst_path = os.path.join(wsi_dir, temp_name)
+        
+        # Physical Copy to /tmp
+        src_abs = os.path.abspath(src_path)
+        if os.path.exists(dst_path): os.remove(dst_path)
+        
+        try:
+            shutil.copy2(src_abs, dst_path)
+            # FORCE PERMISSIONS: Ensure the processing script can read it
+            os.chmod(dst_path, 0o666)
+            
+            fsize = os.path.getsize(dst_path)
+            print(f"  Copied to local /tmp: {dst_path} ({fsize/1024/1024:.2f} MB)")
+            
+            # Verify it's a valid TIFF/SVS (TIFF files start with 'II*' or 'MM*')
+            with open(dst_path, 'rb') as f:
+                header = f.read(4)
+                print(f"  File header: {header}")
+                if header not in [b'II\x2a\x00', b'MM\x00\x2a']:
+                    print("  [WARN] File does not look like a standard TIFF/SVS!")
+        except Exception as e:
+            print(f"  [ERROR] Failed to copy {slide_id}: {e}")
+            continue
+            
+        # Verify readability
+        if not os.path.exists(dst_path) or os.path.getsize(dst_path) == 0:
+            print(f"  [ERROR] File {dst_path} is missing or empty after copy!")
+            continue
+            
+        for folder in ["patches", "masks", "stitches"]:
+            for name_to_clean in [slide_id, f"slide_{i}"]:
+                for ext in [".h5", ".png"]:
+                    p = os.path.join(patch_dir, folder, f"{name_to_clean}{ext}")
+                    if os.path.exists(p): os.remove(p)
 
-    # Deduplicate
-    seen = set()
-    unique_slide_ids = []
-    for sid in slide_ids:
-        if sid not in seen:
-            seen.add(sid)
-            unique_slide_ids.append(sid)
-    slide_ids = unique_slide_ids
-
-    print(f"\n{'='*60}")
-    print(f"Processing {len(slide_ids)} slide(s): {slide_ids}")
-    print(f"wsi_dir  : {wsi_dir}")
-    print(f"patch_dir: {patch_dir}")
-    print(f"feat_dir : {feat_dir}")
-    print(f"{'='*60}\n")
+    print(f"\nProcessing {len(slide_ids)} slide(s): {slide_ids}\n")
 
     results = []
 
     try:
-        # ------------------------------------------------------------------
-        # Step 1 — Segmentation & Patching
-        # ------------------------------------------------------------------
+        # Step 1 — Patching
         print("Running PrePATH patching...")
         cmd_patch = [
             PREPATH_PYTHON, "create_patches_fp.py",
@@ -312,46 +322,32 @@ def process_wsi(wsi_files, local_paths_text):
         ]
         subprocess.run(cmd_patch, cwd=prepath_dir, check=True)
 
-        # ------------------------------------------------------------------
         # Step 2 — Build CSV
-        # ------------------------------------------------------------------
-        print("Generating CSV...")
-        actual_svs = sorted(glob.glob(os.path.join(wsi_dir, "*.svs")))
-        if not actual_svs:
-            return pd.DataFrame({"Error": ["No .svs files found in wsi_dir after copy."]})
-
-        slide_ids = [os.path.splitext(os.path.basename(p))[0] for p in actual_svs]
-
+        temp_to_orig = {v: k for k, v in id_to_temp_name.items()}
         valid_slide_ids = []
-        for sid in slide_ids:
-            h5_path = os.path.join(patch_dir, "patches", f"{sid}.h5")
+        for temp_sid in id_to_temp_name.values():
+            orig_sid = temp_to_orig[temp_sid]
+            h5_path = os.path.join(patch_dir, "patches", f"{temp_sid}.h5")
             if os.path.exists(h5_path):
-                valid_slide_ids.append(sid)
+                valid_slide_ids.append((temp_sid, orig_sid))
             else:
-                print(f"  [WARN] No .h5 patch file for '{sid}' — skipping in CSV.")
+                print(f"  [WARN] No .h5 patch file for '{orig_sid}'")
                 results.append({
-                    "Slide": sid,
-                    "Ground Truth": get_ground_truth(sid),
-                    "ABMIL":  "Patching failed / no patches",
-                    "CEMIL":  "Patching failed / no patches",
-                    "DSMIL":  "Patching failed / no patches",
+                    "Slide": orig_sid, "Ground Truth": get_ground_truth(orig_sid),
+                    "ABMIL": "Patching failed", "CEMIL": "Patching failed", "DSMIL": "Patching failed"
                 })
 
         if not valid_slide_ids:
-            return pd.DataFrame({"Error": ["Patching produced no valid .h5 files."]})
+            return pd.DataFrame(results) if results else pd.DataFrame({"Error": ["No patches generated."]})
 
         csv_path = os.path.join(csv_dir, "part_0.csv")
         with open(csv_path, "w") as f:
             f.write("case_id,slide_id\n")
-            for sid in valid_slide_ids:
-                f.write(f'"{sid}","{sid}"\n')
+            for tsid, _ in valid_slide_ids:
+                f.write(f'"{tsid}","{tsid}"\n')
 
-        print(f"  CSV written with {len(valid_slide_ids)} slide(s): {valid_slide_ids}")
-
-        # ------------------------------------------------------------------
         # Step 3 — Feature Extraction
-        # ------------------------------------------------------------------
-        print("Extracting features with ResNet50...")
+        print("Extracting features...")
         cmd_feat = [
             PREPATH_PYTHON, "extract_features_fp_fast.py",
             "--model",          "resnet50",
@@ -367,169 +363,58 @@ def process_wsi(wsi_files, local_paths_text):
         ]
         subprocess.run(cmd_feat, cwd=prepath_dir, check=True)
 
-        # ------------------------------------------------------------------
-        # Step 4 — Per-slide inference + logging
-        # ------------------------------------------------------------------
+        # Step 4 — Inference
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        for slide_id in valid_slide_ids:
-            pt_path = os.path.join(feat_dir, "pt_files", "resnet50", f"{slide_id}.pt")
-            ground_truth = get_ground_truth(slide_id)
+        for tsid, osid in valid_slide_ids:
+            pt_path = os.path.join(feat_dir, "pt_files", "resnet50", f"{tsid}.pt")
+            gt = get_ground_truth(osid)
 
             if not os.path.exists(pt_path):
-                print(f"  [WARN] No .pt file found for '{slide_id}', skipping inference.")
-                results.append({
-                    "Slide": slide_id,
-                    "Ground Truth": ground_truth,
-                    "ABMIL": "Feature extraction failed",
-                    "CEMIL": "Feature extraction failed",
-                    "DSMIL": "Feature extraction failed",
-                })
+                results.append({"Slide": osid, "Ground Truth": gt, "ABMIL": "Feat fail", "CEMIL": "Feat fail", "DSMIL": "Feat fail"})
                 continue
 
-            features = torch.load(pt_path, map_location=device)
-            if not isinstance(features, torch.Tensor):
-                features = torch.tensor(features)
-            features = features.float()
-            if features.dim() > 2:
-                features = features.squeeze(0)
+            features = torch.load(pt_path, map_location=device).float()
+            if features.dim() > 2: features = features.squeeze(0)
 
-            print(f"  [{slide_id}] Features shape: {features.shape}")
-
-            # --- ABMIL ---
-            res_abmil = "Model not loaded"
+            # ABMIL
+            res_abmil = "N/A"
             if abmil_model:
-                _, label, probs, attention = predict_abmil(abmil_model, features, device=device)
+                _, label, probs, att = predict_abmil(abmil_model, features, device=device)
                 res_abmil = f"{label} ({format_probs(probs)})"
+                save_log(osid, "abmil", {"timestamp": timestamp, "slide_id": osid, "ground_truth": gt, "model": "ABMIL", "predicted_label": label, "probabilities": probs.tolist(), "attention_weights": att.tolist()})
 
-                log_data = {
-                    "timestamp": timestamp,
-                    "slide_id": slide_id,
-                    "ground_truth": ground_truth,
-                    "model": "ABMIL",
-                    "predicted_label": label,
-                    "probabilities": {"LUAD": float(probs[0]), "LUSC": float(probs[1])},
-                    "attention_weights": attention,
-                    "attention_stats": {
-                        "min": float(attention.min()),
-                        "max": float(attention.max()),
-                        "mean": float(attention.mean()),
-                        "std": float(attention.std()),
-                        "num_patches": int(attention.shape[0]),
-                        "top5_patch_indices": attention.argsort()[::-1][:5].tolist(),
-                    },
-                }
-                save_log(slide_id, "abmil", log_data)
-
-            # --- CEMIL ---
-            res_cemil = "Model not loaded"
+            # CEMIL
+            res_cemil = "N/A"
             if cemil_instructor and cemil_learner:
-                _, label, probs, top_indices, A_instructor, A_learner = predict_cemil(
-                    cemil_instructor, cemil_learner, features, device=device
-                )
+                _, label, probs, top_idx, A_i, A_l = predict_cemil(cemil_instructor, cemil_learner, features, device=device)
                 res_cemil = f"{label} ({format_probs(probs)})"
+                save_log(osid, "cemil", {"timestamp": timestamp, "slide_id": osid, "ground_truth": gt, "model": "CEMIL", "predicted_label": label, "probabilities": probs.tolist(), "instructor_attention": A_i.tolist(), "learner_attention": A_l.tolist()})
 
-                log_data = {
-                    "timestamp": timestamp,
-                    "slide_id": slide_id,
-                    "ground_truth": ground_truth,
-                    "model": "CEMIL",
-                    "predicted_label": label,
-                    "probabilities": {"LUAD": float(probs[0]), "LUSC": float(probs[1])},
-                    "top_k_patch_indices": top_indices,
-                    "instructor_attention": A_instructor,
-                    "instructor_attention_stats": {
-                        "min": float(A_instructor.min()),
-                        "max": float(A_instructor.max()),
-                        "mean": float(A_instructor.mean()),
-                        "num_patches": int(A_instructor.shape[0]),
-                    },
-                    "learner_attention": A_learner,
-                    "learner_attention_stats": {
-                        "min": float(A_learner.min()),
-                        "max": float(A_learner.max()),
-                        "mean": float(A_learner.mean()),
-                        "num_patches": int(A_learner.shape[0]),
-                    },
-                }
-                save_log(slide_id, "cemil", log_data)
-
-            # --- DSMIL ---
-            res_dsmil = "Model not loaded"
+            # DSMIL
+            res_dsmil = "N/A"
             if dsmil_model:
                 with torch.no_grad():
-                    feats = features.squeeze(0).to(device)
-                    ins_scores, bag_prediction, A, B = dsmil_model(feats)
+                    feats = features.to(device)
+                    ins_scores, bag_prediction, A, _ = dsmil_model(feats)
                     max_prediction, _ = torch.max(ins_scores, 0)
                     score = 0.5 * torch.sigmoid(bag_prediction) + 0.5 * torch.sigmoid(max_prediction.view(1, -1))
-                    probs_tensor = torch.softmax(score, dim=1).squeeze()
-                    probs = probs_tensor.cpu().numpy()
-                    pred = int(np.argmax(probs))
-                    label = {0: "LUAD", 1: "LUSC"}[pred]
+                    probs = torch.softmax(score, dim=1).squeeze().cpu().numpy()
+                    label = "LUAD" if np.argmax(probs) == 0 else "LUSC"
+                    res_dsmil = f"{label} ({format_probs(probs)})"
+                    save_log(osid, "dsmil", {"timestamp": timestamp, "slide_id": osid, "ground_truth": gt, "model": "DSMIL", "predicted_label": label, "probabilities": probs.tolist(), "i_classifier_scores": ins_scores.cpu().numpy().tolist(), "b_classifier_attention": A.squeeze().cpu().numpy().tolist()})
 
-                    # Detailed raw scores for logging
-                    bag_pred_sigmoid  = torch.sigmoid(bag_prediction).squeeze().cpu().numpy()
-                    max_pred_sigmoid  = torch.sigmoid(max_prediction).squeeze().cpu().numpy()
-                    ins_scores_np     = ins_scores.cpu().numpy()
-                    attention_np      = A.squeeze().cpu().numpy()
+            results.append({"Slide": osid, "Ground Truth": gt, "ABMIL": res_abmil, "CEMIL": res_cemil, "DSMIL": res_dsmil})
 
-                res_dsmil = f"{label} ({format_probs(probs)})"
-
-                log_data = {
-                    "timestamp": timestamp,
-                    "slide_id": slide_id,
-                    "ground_truth": ground_truth,
-                    "model": "DSMIL",
-                    "predicted_label": label,
-                    "probabilities": {"LUAD": float(probs[0]), "LUSC": float(probs[1])},
-                    # i_classifier (instance-level scores per patch, shape [num_patches, 2])
-                    "i_classifier_scores_raw": ins_scores_np,
-                    "i_classifier_max_instance_sigmoid": {
-                        "LUAD": float(max_pred_sigmoid[0]) if max_pred_sigmoid.ndim > 0 else float(max_pred_sigmoid),
-                        "LUSC": float(max_pred_sigmoid[1]) if (max_pred_sigmoid.ndim > 0 and len(max_pred_sigmoid) > 1) else None,
-                    },
-                    # b_classifier (bag-level scores, shape [1, 2])
-                    "b_classifier_bag_prediction_sigmoid": {
-                        "LUAD": float(bag_pred_sigmoid[0]) if bag_pred_sigmoid.ndim > 0 else float(bag_pred_sigmoid),
-                        "LUSC": float(bag_pred_sigmoid[1]) if (bag_pred_sigmoid.ndim > 0 and len(bag_pred_sigmoid) > 1) else None,
-                    },
-                    # Combined score (0.5 * bag + 0.5 * max-instance before softmax)
-                    "combined_score_before_softmax": score.squeeze().cpu().numpy(),
-                    # Attention weights from b_classifier
-                    "b_classifier_attention": attention_np,
-                    "b_classifier_attention_stats": {
-                        "min": float(attention_np.min()),
-                        "max": float(attention_np.max()),
-                        "mean": float(attention_np.mean()),
-                        "num_patches": int(attention_np.shape[0]) if attention_np.ndim > 0 else 1,
-                        "top5_patch_indices": attention_np.argsort()[::-1][:5].tolist() if attention_np.ndim > 0 else [],
-                    },
-                }
-                save_log(slide_id, "dsmil", log_data)
-
-            results.append({
-                "Slide": slide_id,
-                "Ground Truth": ground_truth,
-                "ABMIL": res_abmil,
-                "CEMIL": res_cemil,
-                "DSMIL": res_dsmil,
-            })
-
-    except subprocess.CalledProcessError as e:
-        return pd.DataFrame({"Error": [f"Subprocess failed: {e}"]})
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return pd.DataFrame({"Error": [f"Error: {str(e)}"]})
+        return pd.DataFrame({"Error": [str(e)]})
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
-        print(f"Cleaned up temp dir: {temp_dir}")
 
-    return pd.DataFrame(results) if results else empty_df
+    return pd.DataFrame(results)
 
 
 # ---------------------------------------------------------------------------
-# Gradio UI
+# UI
 # ---------------------------------------------------------------------------
 with gr.Blocks(title="NSCLC WSI Classifier", theme=gr.themes.Default()) as demo:
     with gr.Row():
@@ -564,13 +449,13 @@ with gr.Blocks(title="NSCLC WSI Classifier", theme=gr.themes.Default()) as demo:
 
         with gr.Tab("💾 Load from Local Disk (Faster)"):
             local_paths_input = gr.Textbox(
-                label="Enter absolute paths to .svs files (one per line)",
-                placeholder="/path/to/slide1.svs\n/path/to/slide2.svs",
+                label="Enter absolute paths or slide IDs (one per line)",
+                placeholder="slide1.svs\n/path/to/slide2.svs",
                 lines=5,
             )
             gr.Markdown(
                 "> ✅ **Recommended** when running on the same server as the data. "
-                "No upload required — files are read directly from disk."
+                "No upload required — files are processed directly from disk."
             )
 
     gr.Markdown("---")
@@ -591,4 +476,4 @@ with gr.Blocks(title="NSCLC WSI Classifier", theme=gr.themes.Default()) as demo:
 
 if __name__ == "__main__":
     # Launch on all interfaces for remote access
-    demo.launch(server_name="0.0.0.0", server_port=7899, share=True)
+    demo.launch(server_name="0.0.0.0", server_port=7910, share=True)
